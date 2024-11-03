@@ -32,7 +32,7 @@ def save_messages(user_dir, date_str, messages):
                 indented_line = ' ' * indent_length + line
                 file.write(f"{indented_line}\n")
 
-def calculate_time_spent(messages, end_date):
+def calculate_time_spent(messages):
     typing_speed = 200  # symbols per minute
     reading_speed = 170  # words per minute
 
@@ -52,7 +52,7 @@ def calculate_time_spent(messages, end_date):
     awaiting_reply = False
     last_incoming_time = None
 
-    for msg in messages_sorted:
+    for day, msg in enumerate(messages_sorted):
         if msg.text:
             if not msg.out:
                 # Incoming message
@@ -75,10 +75,8 @@ def calculate_time_spent(messages, end_date):
                     last_incoming_time = None
                     awaiting_reply = False
 
-    if awaiting_reply and last_incoming_time.date() == end_date.date():
+    if awaiting_reply:
         messages_without_reply = 1
-    else:
-        messages_without_reply = 0
 
     if reply_times:
         average_reply_time = sum(reply_times) / len(reply_times)
@@ -178,7 +176,7 @@ async def process_chats(client, start_date, end_date):
 
     chat_stats_list = []
 
-    async for dialog in client.iter_dialogs():
+    async for dialog in client.iter_dialogs(offset_date=datetime.now()):
         if dialog.date.date() < start_date.date():
             break
 
@@ -186,6 +184,9 @@ async def process_chats(client, start_date, end_date):
 
         if isinstance(entity, User) and not entity.bot and entity.id != me.id and entity.id != 777000:
             messages_by_date = await fetch_messages(client, entity, start_date, end_date)
+
+            if entity.id == 6406503745:
+                print('artem')
 
             if messages_by_date:
                 user_name = f"{entity.first_name or ''}_{entity.last_name or ''}_{entity.id}"
@@ -203,11 +204,11 @@ async def process_chats(client, start_date, end_date):
                 total_reply_times = []
                 total_messages_without_reply = 0
 
-                for date_str in sorted(messages_by_date.keys()):
+                for i, date_str in enumerate(sorted(messages_by_date.keys())):
                     messages = messages_by_date[date_str]
                     save_messages(user_dir, date_str, messages)
 
-                    stats = calculate_time_spent(messages, end_date)
+                    stats = calculate_time_spent(messages)
                     total_typing_time += stats['typing_time']
                     total_reading_time += stats['reading_time']
                     total_incoming_messages += stats['total_incoming_messages']
@@ -215,7 +216,8 @@ async def process_chats(client, start_date, end_date):
                     total_incoming_symbols += stats['total_incoming_symbols']
                     total_outgoing_symbols += stats['total_outgoing_symbols']
                     total_reply_times.extend(stats['reply_times'])
-                    total_messages_without_reply += stats['messages_without_reply']
+                    if i == len(messages_by_date) - 1:
+                        total_messages_without_reply += stats['messages_without_reply']
 
                 # Calculate overall average reply time
                 if total_reply_times:
