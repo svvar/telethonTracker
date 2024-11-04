@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, time
 
 import os
 import json
@@ -26,15 +26,19 @@ def save_sessions(sessions):
         json.dump({"sessions": sessions}, f, indent=4)
 
 
-def add_session_to_config(session_id, api_id, api_hash, phone):
+def add_session_to_config(session_id, api_id, api_hash, phone, name, last_name):
+    if last_name is None:
+        last_name = ''
     sessions = load_sessions()
     sessions[session_id] = {
         "api_id": api_id,
         "api_hash": api_hash,
-        "phone": phone
+        "phone": phone,
+        "name": name,
+        "last_name": last_name
     }
     save_sessions(sessions)
-    print(f"Акаунт '{session_id}' добавлен")
+    print(f"Акаунт '{session_id} {name} {last_name}' добавлен")
 
 
 def remove_session_from_config(session_id):
@@ -94,7 +98,7 @@ async def login(session_file, api_id, api_hash, phone):
 
         await client.disconnect()
 
-        return client
+        return client, me.first_name, me.last_name
 
     except Exception as e:
         print(f"Ошибка во время входа: {e}")
@@ -115,10 +119,10 @@ async def add_new_session(directory='stored_sessions'):
         print("Неверный API ID. Пожалуйста, введите целое число.")
         return
 
-    session = await login(session_file, int(api_id), api_hash, phone)
+    session, name, last_name = await login(session_file, int(api_id), api_hash, phone)
 
     if session:
-        add_session_to_config(sanitize_phone(phone), api_id, api_hash, phone)
+        add_session_to_config(sanitize_phone(phone), api_id, api_hash, phone, name, last_name)
         await dump_menu(session)
 
 
@@ -128,9 +132,10 @@ def remove_existing_session(directory='stored_sessions'):
         print("\nСписок пуст")
         return
 
+    session_data = load_sessions()
     print("\n=== Удаление акаунта ===")
-    for idx, session in enumerate(sessions, start=1):
-        print(f"{idx}. {session}")
+    for idx, session in enumerate(session_data.values(), start=1):
+        print(f"{idx}. {session['phone']} {session['name']} {session['last_name']}")
 
     try:
         choice = int(input("Выберите акаунт по номеру телефона: ").strip())
@@ -154,9 +159,10 @@ async def select_from_saved_sessions():
         print("\nСписок пуст")
         return
 
+    session_data = load_sessions()
     print("\n=== Выбор акаунта ===")
-    for idx, session in enumerate(sessions, start=1):
-        print(f"{idx}.  {session}")
+    for idx, session in enumerate(session_data.values(), start=1):
+        print(f"{idx}.  {session['phone']} {session['name']} {session['last_name']}")
 
     session_menu_selector = f"1-{len(sessions)}" if len(sessions) >= 2 else "1"
     try:
@@ -195,13 +201,39 @@ async def dump_menu(session):
                 date_start, date_end = date_input.split('-')
                 date_start = datetime.strptime(date_start.strip(), "%d.%m.%Y").date()
                 date_end = datetime.strptime(date_end.strip(), "%d.%m.%Y").date()
+
+            if date_end < date_start:
+                raise ValueError("Дата окончания должна быть позже даты начала.")
         except ValueError:
-            print("Неверный формат даты. Повторите")
+            print("Неверный формат даты или дата окончание раньше даты начала. Повторите")
+        else:
+            break
+
+    while True:
+        time_input = input("Введите рабочие часы (чч:мм - чч:мм): ").strip()
+        try:
+            parts = time_input.split('-')
+            if len(parts) != 2:
+                raise ValueError("Input must contain exactly one '-' separator.")
+
+            start_str, end_str = parts[0].strip(), parts[1].strip()
+            time_format = "%H:%M"
+            start_dt = datetime.strptime(start_str, time_format)
+            start_time = start_dt.time()
+
+            end_dt = datetime.strptime(end_str, time_format)
+            end_time = end_dt.time()
+
+            if (end_time.hour, end_time.minute) <= (start_time.hour, start_time.minute):
+                raise ValueError("Время окончания должно быть позже времени начала.")
+
+        except ValueError as ve:
+            print(f"Неверный формат времени: {ve}. Повтор")
         else:
             break
 
     async with session:
-        await stats_tracker.process_chats(session, date_start, date_end)
+        await stats_tracker.process_chats(session, date_start, date_end, start_time, end_time)
 
 
 # =======================
@@ -213,7 +245,7 @@ async def main():
 
     while True:
         choice = display_menu()
-        os.system('cls')
+        os.system('cls') if os.name == 'nt' else os.system('clear')
 
         if choice == '1':
             await select_from_saved_sessions()
