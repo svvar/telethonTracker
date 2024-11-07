@@ -140,7 +140,7 @@ def remove_existing_session(directory='stored_sessions'):
     try:
         choice = int(input("Выберите акаунт по номеру телефона: ").strip())
         if 1 <= choice <= len(sessions):
-            session_id = sessions[choice - 1]
+            session_id = list(session_data.keys())[choice - 1]
             session_file = os.path.join(directory, f"{session_id}.session")
 
             if os.path.exists(session_file):
