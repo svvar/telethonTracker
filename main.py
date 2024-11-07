@@ -168,7 +168,7 @@ async def select_from_saved_sessions():
     try:
         choice = int(input(f"Выберите акаунт ({session_menu_selector}): ").strip())
         if 1 <= choice <= len(sessions):
-            session_id = sessions[choice - 1]
+            session_id = list(session_data.keys())[choice - 1]
             session_file = os.path.join('stored_sessions', f"{session_id}.session")
 
             config_loaded = load_sessions()
