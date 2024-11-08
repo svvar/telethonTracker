@@ -1,8 +1,8 @@
 import os
 import re
 import shutil
-from datetime import timedelta, date, datetime
-from telethon.tl.types import User
+from datetime import timedelta, date, datetime, time
+from telethon.tl.types import User, Chat, Channel
 
 
 def sanitize_folder_name(name):
@@ -33,7 +33,7 @@ def save_messages(user_dir, file_name, messages):
                 file.write(f"{indented_line}\n")
 
 
-def calculate_time_spent(messages, work_start, work_end):
+def calculate_time_spent(messages, work_start, work_end, group=False):
     typing_speed = 200  # symbols per minute
     reading_speed = 170  # words per minute
 
@@ -52,6 +52,7 @@ def calculate_time_spent(messages, work_start, work_end):
     messages_sorted = sorted(messages, key=lambda m: m.date)
 
     awaiting_reply = False
+    last_incoming_chat_datetimes = []
     last_incoming_datetime = None
 
     for msg in messages_sorted:
@@ -61,8 +62,10 @@ def calculate_time_spent(messages, work_start, work_end):
                 total_incoming_messages += 1
                 total_incoming_symbols += len(msg.text)
                 total_reading_words += len(msg.text.split())
-
-                last_incoming_datetime = msg.date
+                if group:
+                    last_incoming_chat_datetimes.append(msg.date)
+                else:
+                    last_incoming_datetime = msg.date
                 awaiting_reply = True
             else:
                 # Outgoing message
@@ -71,16 +74,32 @@ def calculate_time_spent(messages, work_start, work_end):
                 total_typing_symbols += len(msg.text)
 
                 if awaiting_reply:
-                    last_incoming_date = last_incoming_datetime.date()
-                    work_start_datetime = datetime.combine(last_incoming_date, work_start, tzinfo=last_incoming_datetime.tzinfo)
-                    work_end_datetime = datetime.combine(last_incoming_date, work_end, tzinfo=last_incoming_datetime.tzinfo)
+                    if group:
+                        last_3_incoming_times = last_incoming_chat_datetimes[-3:]
+                        # work_start_datetime = datetime.combine(last_3_incoming_times[-1], work_start, tzinfo=msg.date.tzinfo)
+                        # work_end_datetime = datetime.combine(last_3_incoming_times[-1], work_end, tzinfo=msg.date.tzinfo)
+                        work_start_datetime = datetime.combine(msg.date.date(), work_start, tzinfo=msg.date.tzinfo)
+                        work_end_datetime = datetime.combine(msg.date.date(), work_end, tzinfo=msg.date.tzinfo)
 
-                    if last_incoming_datetime >= work_start_datetime and msg.date <= work_end_datetime:
-                        r_times_working.append((msg.date - last_incoming_datetime).total_seconds())
+                        average_reply_time = sum([(msg.date - dt).total_seconds() for dt in last_3_incoming_times]) / len(last_3_incoming_times)
+                        if all([dt >= work_start_datetime for dt in last_3_incoming_times]) and msg.date <= work_end_datetime:
+                            r_times_working.append(average_reply_time)
+                        else:
+                            r_times_night.append(average_reply_time)
+
+                        last_incoming_chat_datetimes = []
+
                     else:
-                        r_times_night.append((msg.date - last_incoming_datetime).total_seconds())
+                        last_incoming_date = last_incoming_datetime.date()
+                        work_start_datetime = datetime.combine(last_incoming_date, work_start, tzinfo=last_incoming_datetime.tzinfo)
+                        work_end_datetime = datetime.combine(last_incoming_date, work_end, tzinfo=last_incoming_datetime.tzinfo)
 
-                    last_incoming_datetime = None
+                        if last_incoming_datetime >= work_start_datetime and msg.date <= work_end_datetime:
+                            r_times_working.append((msg.date - last_incoming_datetime).total_seconds())
+                        else:
+                            r_times_night.append((msg.date - last_incoming_datetime).total_seconds())
+
+                        last_incoming_datetime = None
                     awaiting_reply = False
 
     if awaiting_reply:
@@ -90,6 +109,7 @@ def calculate_time_spent(messages, work_start, work_end):
     average_working_reply = sum(r_times_working) / len(r_times_working) if r_times_working else None
 
     return {
+        'group': group,
         'typing_time': total_typing_symbols / typing_speed if typing_speed else 0,
         'reading_time': total_reading_words / reading_speed if reading_speed else 0,
         'incoming_messages': total_incoming_messages,
@@ -175,17 +195,20 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
     output_dir = f'{sanitize_folder_name(me.first_name)}_messages_{date_start_str}_{date_end_str}'
     os.makedirs(output_dir, exist_ok=True)
 
-    total_typing_time = 0
-    total_reading_time = 0
-    total_incoming_messages = 0
-    total_outgoing_messages = 0
-    total_incoming_symbols = 0
-    total_outgoing_symbols = 0
-    total_work_reply_times = []
-    total_night_reply_times = []
-    total_messages_without_reply = 0
+    processed_chats, processed_groups = 0, 0
+
+    total_typing_time, total_group_typing_time = 0, 0
+    total_reading_time, total_group_reading_time = 0, 0
+    total_incoming_messages, total_group_incoming_messages = 0, 0
+    total_outgoing_messages, total_group_outgoing_messages = 0, 0
+    total_incoming_symbols, total_group_incoming_symbols = 0, 0
+    total_outgoing_symbols, total_group_outgoing_symbols = 0, 0
+    total_work_reply_times, total_group_work_reply_times = [], []
+    total_night_reply_times, total_group_night_reply_times = [], []
+    total_messages_without_reply, total_group_without_reply = 0, 0
 
     chat_stats_list = []
+    groups_stats_list = []
 
     async for dialog in client.iter_dialogs(offset_date=datetime.now()):
         if dialog.date.date() < start_date.date():
@@ -194,6 +217,7 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
         entity = dialog.entity
 
         if isinstance(entity, User) and not entity.bot and entity.id != me.id and entity.id != 777000:
+            processed_chats += 1
             messages = await fetch_messages(client, entity, start_date, end_date)
 
             if messages:
@@ -203,24 +227,8 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
                 os.makedirs(user_dir, exist_ok=True)
                 print(f"Получаю чат с {entity.first_name} {entity.last_name or ''}")
 
-
                 save_messages(user_dir, f'{sanitize_folder_name(user_name)}.txt', messages)
-
                 stats = calculate_time_spent(messages, work_start, work_end)
-                typing_time = stats['typing_time']
-                reading_time = stats['reading_time']
-                incoming_messages = stats['incoming_messages']
-                outgoing_messages = stats['outgoing_messages']
-                incoming_symbols = stats['incoming_symbols']
-                outgoing_symbols = stats['outgoing_symbols']
-                average_working_reply = stats['average_working_reply']
-                average_night_reply = stats['average_night_reply']
-                work_reply_times = stats['working_reply_times']
-                night_reply_times = stats['night_reply_times']
-                messages_without_reply = stats['messages_without_reply']
-
-                average_working_reply_formatted = format_duration(average_working_reply) if average_working_reply else "N/A"
-                average_night_reply_formatted = format_duration(average_night_reply) if average_night_reply else "N/A"
 
                 # FOR TESTING PURPOSES
                 # with open(os.path.join('chat_statistics_ny.txt'), 'a', encoding='utf-8') as f:
@@ -232,41 +240,91 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
                 #
                 #     f.write("\n\n")
 
-                # Accumulate for overall stats
-                total_typing_time += typing_time
-                total_reading_time += reading_time
-                total_incoming_messages += incoming_messages
-                total_outgoing_messages += outgoing_messages
-                total_incoming_symbols += incoming_symbols
-                total_outgoing_symbols += outgoing_symbols
-                total_work_reply_times.extend(work_reply_times)
-                total_night_reply_times.extend(night_reply_times)
-                total_messages_without_reply += messages_without_reply
+                total_typing_time += stats['typing_time']
+                total_reading_time += stats['reading_time']
+                total_incoming_messages += stats['incoming_messages']
+                total_outgoing_messages += stats['outgoing_messages']
+                total_incoming_symbols += stats['incoming_symbols']
+                total_outgoing_symbols += stats['outgoing_symbols']
+                total_work_reply_times.extend(stats['working_reply_times'])
+                total_night_reply_times.extend(stats['night_reply_times'])
+                total_messages_without_reply += stats['messages_without_reply']
 
                 # Prepare chat statistics for writing to file
                 chat_stats = {
                     'chat_name': f"{entity.first_name} {entity.last_name or ''}".strip(),
-                    'typing_time': format_time(typing_time),
-                    'reading_time': format_time(reading_time),
-                    'total_incoming_messages': incoming_messages,
-                    'total_outgoing_messages': outgoing_messages,
-                    'total_incoming_symbols': incoming_symbols,
-                    'total_outgoing_symbols': outgoing_symbols,
-                    'work_reply_time': average_working_reply_formatted,
-                    'night_reply_time': average_night_reply_formatted,
-                    'messages_without_reply': messages_without_reply
+                    'typing_time': format_time(stats['typing_time']),
+                    'reading_time': format_time(stats['reading_time']),
+                    'total_incoming_messages': stats['incoming_messages'],
+                    'total_outgoing_messages': stats['outgoing_messages'],
+                    'total_incoming_symbols': stats['incoming_symbols'],
+                    'total_outgoing_symbols': stats['outgoing_symbols'],
+                    'work_reply_time': format_duration(stats['average_working_reply']) if stats['average_working_reply'] else "N/A",
+                    'night_reply_time': format_duration(stats['average_night_reply']) if stats['average_night_reply'] else "N/A",
+                    'messages_without_reply': stats['messages_without_reply']
                 }
 
                 chat_stats_list.append(chat_stats)
 
-                if messages_without_reply > 0:
+                if stats['messages_without_reply'] > 0:
                     unanswered_dir = os.path.join(output_dir, '!!!!!UNANSWERED')
                     os.makedirs(unanswered_dir, exist_ok=True)
                     dest_chat_dir = os.path.join(unanswered_dir, sanitize_folder_name(user_name))
                     # Copy the entire chat directory
                     shutil.copytree(user_dir, dest_chat_dir, dirs_exist_ok=True)
 
+        elif isinstance(entity, Chat) or (isinstance(entity, Channel) and entity.megagroup):
+            processed_groups += 1
+            messages = await fetch_messages(client, entity, start_date, end_date)
+
+            if messages:
+                user_name = f"GROUP_{entity.title or ''}_{entity.id}"
+                user_name = user_name.strip().replace(' ', '_').replace(os.sep, '_')
+                user_dir = os.path.join(output_dir, sanitize_folder_name(user_name))
+                os.makedirs(user_dir, exist_ok=True)
+                print(f"Получаю чат с {entity.title}")
+
+                save_messages(user_dir, f'{sanitize_folder_name(user_name)}.txt', messages)
+                stats = calculate_time_spent(messages, work_start, work_end, group=True)
+
+                # FOR TESTING PURPOSES
+                # with open(os.path.join('chat_statistics_ny.txt'), 'a', encoding='utf-8') as f:
+                #     f.write(f"Чат с {entity.title}:\n")
+                #     f.write(f"   Среднее время ответа (рабочее время): {format_duration(stats['average_working_reply']) if stats['average_working_reply'] else 'N/A'}\n")
+                #     f.write(f"   Среднее время ответа (нерабочее время): {format_duration(stats['average_night_reply']) if stats['average_night_reply'] else 'N/A'}\n")
+                #     f.write(f"   work_reply_times: {stats['working_reply_times']}\n")
+                #     f.write(f"   night_reply_times: {stats['night_reply_times']}\n")
+                #
+                #     f.write("\n\n")
+
+                total_group_typing_time += stats['typing_time']
+                total_group_reading_time += stats['reading_time']
+                total_group_incoming_messages += stats['incoming_messages']
+                total_group_outgoing_messages += stats['outgoing_messages']
+                total_group_incoming_symbols += stats['incoming_symbols']
+                total_group_outgoing_symbols += stats['outgoing_symbols']
+                total_group_work_reply_times.extend(stats['working_reply_times'])
+                total_group_night_reply_times.extend(stats['night_reply_times'])
+                total_messages_without_reply += stats['messages_without_reply']
+                total_group_without_reply += stats['messages_without_reply']
+
+                group_chat_stats = {
+                    'chat_name': f"{entity.title or ''}".strip(),
+                    'typing_time': format_time(stats['typing_time']),
+                    'reading_time': format_time(stats['reading_time']),
+                    'total_incoming_messages': stats['incoming_messages'],
+                    'total_outgoing_messages': stats['outgoing_messages'],
+                    'total_incoming_symbols': stats['incoming_symbols'],
+                    'total_outgoing_symbols': stats['outgoing_symbols'],
+                    'work_reply_time': format_duration(stats['average_working_reply']) if stats['average_working_reply'] else "N/A",
+                    'night_reply_time': format_duration(stats['average_night_reply']) if stats['average_night_reply'] else "N/A",
+                    'messages_without_reply': stats['messages_without_reply']
+                }
+
+                groups_stats_list.append(group_chat_stats)
+
     write_chat_statistics(chat_stats_list, filename=f'{sanitize_folder_name(me.first_name)}_statistics_{date_start_str}_{date_end_str}.txt')
+    write_chat_statistics(groups_stats_list, filename=f'{sanitize_folder_name(me.first_name)}_GROUP_statistics_{date_start_str}_{date_end_str}.txt')
 
     if total_work_reply_times:
         overall_work_reply_time = sum(total_work_reply_times) / len(total_work_reply_times)
@@ -281,6 +339,7 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
         overall_night_reply_time_formatted = "N/A"
 
     print("\n=== Общая статистика ===")
+    print(f"Всего чатов: {processed_chats}")
     print(f"Всего времени на печать: {format_time(total_typing_time)}")
     print(f"Всего времени на прочтение: {format_time(total_reading_time)}")
     print(f"Исходящих сообщений: {total_outgoing_messages}")
@@ -291,3 +350,27 @@ async def process_chats(client, start_date, end_date, work_start, work_end):
     print(f"Среднее время ответа в нерабочее время (по всех чатах): {overall_night_reply_time_formatted}")
     print(f"Сообщений без ответа: {total_messages_without_reply}")
 
+
+    if total_group_work_reply_times:
+        overall_group_work_reply_time = sum(total_group_work_reply_times) / len(total_group_work_reply_times)
+        overall_group_work_reply_time_formatted = format_duration(overall_group_work_reply_time)
+    else:
+        overall_group_work_reply_time_formatted = "N/A"
+
+    if total_group_night_reply_times:
+        overall_group_night_reply_time = sum(total_group_night_reply_times) / len(total_group_night_reply_times)
+        overall_group_night_reply_time_formatted = format_duration(overall_group_night_reply_time)
+    else:
+        overall_group_night_reply_time_formatted = "N/A"
+
+    print("\n\n=== Общая статистика по группам ===")
+    print(f"Всего групп: {processed_groups}")
+    print(f"Всего времени на печать: {format_time(total_group_typing_time)}")
+    print(f"Всего времени на прочтение: {format_time(total_group_reading_time)}")
+    print(f"Исходящих сообщений: {total_group_outgoing_messages}")
+    print(f"Входящих сообщений: {total_group_incoming_messages}")
+    print(f"Написано символов: {total_group_outgoing_symbols}")
+    print(f"Получено символов: {total_group_incoming_symbols}")
+    print(f"Среднее время ответа в рабочее время (по всем группам): {overall_group_work_reply_time_formatted}")
+    print(f"Среднее время ответа в нерабочее время (по всем группам): {overall_group_night_reply_time_formatted}")
+    print(f"Чатов без ответа: {total_group_without_reply}")
